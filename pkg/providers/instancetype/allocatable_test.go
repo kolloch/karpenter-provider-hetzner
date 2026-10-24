@@ -287,6 +287,7 @@ func TestCapacity_VMMemoryOverheadMatchesRegisteredNodes(t *testing.T) {
 		{"cx33", 8, 7937224},
 		{"cx43", 16, 15988560},
 		{"cx53", 32, 32089152},
+		{"cpx62", 32, 32080168},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			it := listOne(t, makeServerType(tc.name, hcloud.ArchitectureX86, hcloud.CPUTypeShared, 2, tc.memGB, 80, testPricings), nc)
@@ -302,6 +303,37 @@ func TestCapacity_VMMemoryOverheadMatchesRegisteredNodes(t *testing.T) {
 				t.Errorf("modelled memory %d is not a whole MiB", got.Value())
 			}
 		})
+	}
+}
+
+// Both halves together against one real node: a cpx62 whose kubelet reports
+// 32080168Ki capacity and 31228200Ki allocatable, with system-reserved 576Mi,
+// kube-reserved 256Mi and no memory.available threshold. Advertised memory minus
+// the flat 100Mi claims 32668Mi, about 2170Mi more than the node admits. With the
+// reservations and the VM overhead declared, the model must not exceed what the
+// node admits, and should stay within 1% of it.
+func TestAllocatable_DeclaredNodeClassMatchesRegisteredNode(t *testing.T) {
+	nc := &apiv1.HCloudNodeClass{Spec: apiv1.HCloudNodeClassSpec{
+		VMMemoryOverheadPercent: "4.5",
+		Kubelet: &apiv1.KubeletConfiguration{
+			SystemReserved: map[string]apiv1.ReservedQuantity{"cpu": "100m", "memory": "576Mi"},
+			KubeReserved:   map[string]apiv1.ReservedQuantity{"cpu": "100m", "memory": "256Mi"},
+			EvictionHard: map[string]apiv1.EvictionThreshold{
+				"memory.available": "0%", "nodefs.available": "5%", "imagefs.available": "5%",
+			},
+		},
+	}}
+	it := listOne(t, makeServerType("cpx62", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 16, 32, 640, testPricings), nc)
+	const realAllocatableKi = 31228200
+	got := it.Allocatable()[corev1.ResourceMemory]
+	if got.Value() > realAllocatableKi*1024 {
+		t.Errorf("allocatable %dMi exceeds the %dMi the node admits", got.Value()>>20, int64(realAllocatableKi)>>10)
+	}
+	if got.Value() < realAllocatableKi*1024*99/100 {
+		t.Errorf("allocatable %dMi undersells the %dMi the node admits by more than 1%%", got.Value()>>20, int64(realAllocatableKi)>>10)
+	}
+	if cpu := it.Allocatable()[corev1.ResourceCPU]; cpu.MilliValue() != 15800 {
+		t.Errorf("allocatable cpu %dm, node admits 15800m", cpu.MilliValue())
 	}
 }
 
